@@ -1,0 +1,24 @@
+{
+  "timestamp": "2026-11-20T05:00:57.289191",
+  "selected_metric": "F1-Score",
+  "metric_justification": "F1-Score was selected as the primary quality gate metric because Resume Inflation Detection is an imbalanced classification problem where both False Positives and False Negatives have high business costs. A False Positive wrongly penalizes an honest applicant, damaging candidate experience; whereas a False Negative allows an unqualified applicant to slip into technical rounds, wasting engineering interview bandwidth. F1-Score takes the harmonic mean of Precision and Recall, preventing the accuracy paradox.",
+  "thresholds": {
+    "min_f1_floor": 0.82,
+    "must_beat_champion": true
+  },
+  "champion_metrics": {
+    "f1_score": 0.4216,
+    "accuracy": 0.2867
+  },
+  "candidate_metrics": {
+    "f1_score": 0.92,
+    "accuracy": 0.9385
+  },
+  "checks": {
+    "passed_min_floor": true,
+    "outperformed_or_tied_champion": true
+  },
+  "decision": "PROMOTED_TO_CHAMPION",
+  "status": "ELIGIBLE",
+  "reason": "Candidate model achieved F1-Score of 0.9200 (>= 0.82) and outperformed/tied the existing champion (0.4216). Promoted to production."
+}

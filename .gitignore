@@ -1,4 +1,4 @@
-venv/
+﻿venv/
 __pycache__/
 *.pyc
 .env
@@ -11,6 +11,8 @@ mlflow.db
 mlruns/
 mlartifacts/
 .venv/
+
+@"
 .env
 .env.*
 !.env.example
@@ -20,3 +22,7 @@ __pycache__/
 .venv/
 venv/
 .DS_Store
+
+*.db
+__pycache__/
+*.pyc

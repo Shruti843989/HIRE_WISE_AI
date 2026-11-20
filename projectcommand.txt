@@ -1,0 +1,6 @@
+cd "c:\Users\aggar\OneDrive\Desktop\hirwise ai"
+.\venv\Scripts\Activate.ps1
+venv\Scripts\activate.bat
+python app.py
+
+.\mlops\.venv\Scripts\mlflow.exe server --backend-store-uri sqlite:///mlflow.db --port 6001

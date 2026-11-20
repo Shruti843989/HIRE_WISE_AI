@@ -84,7 +84,28 @@ curl -X POST http://127.0.0.1:8000/predict -H "Content-Type: application/json" -
 curl -X POST http://127.0.0.1:8000/predict -H "Content-Type: application/json" -d "{\"claimed_skill\": 9.5, \"measured_ability\": 4.0}"
 ```
 
-### 6. Docker Containerization
+### 6. Model Monitoring & Retraining Pipeline (Assessment Tasks A - E)
+Execute the complete automated monitoring, retraining, and quality-gated promotion pipeline:
+```powershell
+# Run the complete workflow
+python mlops\monitor_and_retrain.py
+
+# Run all 10 unit tests (Isolated FastAPI + Monitoring Pipeline tests)
+python -m pytest mlops\tests
+```
+
+**Artifacts Generated & Verified:**
+- `mlops/data/baseline_data.csv`: 1,000 historical training records.
+- `mlops/data/incoming_batch.csv`: 300 incoming live interview records.
+- `mlops/models/champion_model.joblib`: Deployed production champion model.
+- `mlops/models/candidate_model.joblib`: Separately saved candidate model artifact.
+- `mlops/reports/evaluation_report.md`: Complete formatted markdown evaluation report.
+- `mlops/reports/evaluation_report.json`: Machine-readable metrics.
+- `mlops/reports/quality_gate_decision.json`: Audit log of the promotion/retention decision.
+
+---
+
+### 7. Docker Containerization
 ```powershell
 # 1. Build Docker image
 docker build -t hirewise-mlops:latest ./mlops
