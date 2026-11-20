@@ -1,0 +1,441 @@
+🧠 Big Picture: Ye MLOps Module Karta Kya Hai?
+
+HireWise AI me hum Resume Inflation Detector banaye hain.
+
+Problem: Candidate ne resume me likha "Rating 9.5 out of 10 in Python" (claimed_skill). Lekin AI mock interview me uska score aaya sirf 4.0 (measured_ability).
+Goal: Model automatically predict karega ki candidate ne resume exaggerated/jhooth bola hai (is_inflated = 1) ya genuine hai (is_inflated = 0).
+
+Iske liye 4 main code files hain:
+
+mlops/train.py — Model training aur MLflow experiment tracking.
+mlops/serve.py — FastAPI model serving engine (REST API).
+mlops/tests/test_api.py — Automated unit testing (using FakeModel).
+mlops/monitor_and_retrain.py — Quality Monitoring, Retraining aur Quality Gate (Practical Tasks A–E).
+1. mlops/train.py (Model Training & MLflow Logging)
+
+Is file ka kaam hai baseline model ko train karna aur MLflow me register karna.
+
+Step 1: Data Generate Karna (generate_sample_data)
+python
+def generate_sample_data(num_samples=1000, random_state=42):
+    claimed = np.round(np.random.uniform(2.0, 10.0, num_samples), 2)
+    measured = np.round(np.random.uniform(1.0, 9.5, num_samples), 2)
+    diff = np.round(claimed - measured, 2)
+    labels = (diff > 2.0).astype(int)
+    # 6% label noise
+    noise_indices = np.random.choice(num_samples, size=int(0.06 * num_samples), replace=False)
+    labels[noise_indices] = 1 - labels[noise_indices]
+Kya ho raha hai: 1000 candidates ka synthetic data banta hai.
+Rule: Agar diff (Claimed - Measured) 2.0 se zyada hai, toh label 1 (Inflated) hoga.
+6% Noise kyu daali? Real life me human judgment 100% perfect nahi hoti. Agar noise na daalein toh model artificial 100% accuracy dikhayega jo real life me impossible hai. 6% noise se realistic 92-94% accuracy aati hai.
+Step 2: MLflow Experiment & Tracking Setup
+python
+mlflow.set_tracking_uri(args.tracking_uri)      # http://127.0.0.1:6001
+mlflow.set_experiment("HireWise-AI")            # Experiment name
+with mlflow.start_run() as run:
+    mlflow.log_params({"n_estimators": args.n_estimators, "max_depth": args.max_depth})
+Kya ho raha hai: MLflow tracking server se connect hota hai aur parameters (n_estimators, max_depth) ko dashboard par record karta hai.
+Step 3: Model Train & Metrics Calculate
+python
+model = RandomForestClassifier(n_estimators=args.n_estimators, max_depth=args.max_depth)
+model.fit(X_train, y_train)
+y_pred = model.predict(X_test)
+test_accuracy = float(accuracy_score(y_test, y_pred))
+test_f1 = float(f1_score(y_test, y_pred))
+mlflow.log_metrics({"test_accuracy": test_accuracy, "test_f1": test_f1})
+RandomForestClassifier use kiya gaya hai.
+Test accuracy aur F1-score calculate karke MLflow me log kiya.
+Step 4: Baseline Quality Gate Check
+python
+if test_accuracy < 0.80:
+    raise ValueError(f"Quality gate failed: {test_accuracy:.4f} < 0.80")
+Agar model ki accuracy 80% se kam aati hai, toh training yahi fail ho jayegi aur bekar model register nahi hoga.
+Step 5: Champion Model Promotion (Model Registry)
+python
+client = MlflowClient()
+# Check existing champion
+champ_mv = client.get_model_version_by_alias("hirewise-inflation-detector", "champion")
+if test_accuracy >= current_champ_accuracy:
+    client.set_registered_model_alias("hirewise-inflation-detector", "champion", str(model_version))
+Smarter Promotion: Naya model tabhi champion banega jab uski accuracy purane champion se behtar ya barabar ho. Agar bekar hui toh wo register toh hoga, par champion tag purane ke paas hi rahega.
+2. mlops/serve.py (FastAPI Production Serving Engine)
+
+Is file ka kaam hai trained model ko REST API banakar live serve karna taaki HireWise AI website ya koi bhi client ise call kar sake.
+
+Step 1: Pydantic Data Validation (Input & Output Schema)
+python
+class PredictRequest(BaseModel):
+    claimed_skill: float = Field(..., ge=0.0, le=10.0)
+    measured_ability: float = Field(..., ge=0.0, le=10.0)
+class PredictResponse(BaseModel):
+    inflated: bool
+    difference: float
+Pydantic ensure karta hai ki user invalid data na bhej sake (jaise rating < 0 ya > 10).
+Step 2: Dynamic Champion Model Loading
+python
+def load_champion_model():
+    model_uri = "models:/hirewise-inflation-detector@champion"
+    return mlflow.sklearn.load_model(model_uri)
+Hardcoded file path load karne ke bajaye, ye MLflow Model Registry se direct @champion alias wala best model load karta hai.
+Matlab agar kal naya retrained model champion bana, toh server automatically naya model utha lega bina code change kiye!
+Step 3: Lifespan Context Manager (Production Best Practice)
+python
+@asynccontextmanager
+async def lifespan(app_instance: FastAPI):
+    app_instance.state.model = model_loader()  # Startup par ek baar load hota hai RAM me
+    yield
+Har request par bar-bar disk se model load karne se server slow ho jata hai. Lifespan se model server start hote hi RAM me load hota hai aur fast predictions deta hai.
+Step 4: Prediction Endpoint (/predict)
+python
+@app.post("/predict", response_model=PredictResponse)
+def predict(request: PredictRequest):
+    diff = round(request.claimed_skill - request.measured_ability, 2)
+    features = [[request.claimed_skill, request.measured_ability, diff]]
+    prediction = app.state.model.predict(features)[0]
+    return PredictResponse(inflated=bool(prediction == 1), difference=diff)
+Difference nikalta hai, model ko feature vector deta hai, aur JSON response return karta hai: {"inflated": true, "difference": 5.5}.
+3. mlops/tests/test_api.py (Unit Testing)
+
+Examiner aksar puchte hain: "Kya tests run karne ke liye MLflow server chalna zaroori hai?"
+
+Answer: "Nahi sir! Humne Application-Factory Pattern aur FakeModel Injection use kiya hai."
+python
+class FakeModel:
+    def predict(self, X):
+        return np.array([1 if row[2] > 2.0 else 0 for row in X])
+def test_predict_inflated_candidate():
+    app = create_app(model_loader=lambda: FakeModel())
+    client = TestClient(app)
+    res = client.post("/predict", json={"claimed_skill": 9.5, "measured_ability": 4.0})
+    assert res.json()["inflated"] is True
+FakeModel ek lightweight mock object hai jo instant answer deta hai.
+Iski wajah se pytest bina kisi database ya MLflow server ke sirf 0.1 second me saare 5 API tests pass kar deta hai.
+4. mlops/monitor_and_retrain.py (Assessment Tasks A — E)
+
+Ye file aapke 10-marks assessment ka main core workflow hai:
+
+Task A — Prepare New Data (prepare_new_data)
+Code: df = pd.read_csv("incoming_batch.csv")
+Validation:
+[c for c in REQUIRED_COLUMNS if c not in df.columns] se columns check kiye.
+df.isnull().sum() se missing values check kiye (Found: 0).
+df["candidate_id"].duplicated() se duplicate check kiye.
+Distribution: Class 0 (Honest): 60.7%, Class 1 (Inflated): 39.3% calculate karke print kiya.
+Task B — Evaluate Existing Model (evaluate_existing_model)
+Purane champion model par naye 300 records pass kiye.
+Metrics nikale:
+Accuracy: 28.67%
+Precision: 30.95%
+Recall: 66.10%
+F1-Score: 42.16%
+Isse prove hua ki samay ke sath naye data par purane model ki quality gir gayi (Data Drift).
+Task C — Retrain Candidate Model (retrain_candidate_model)
+Baseline (1,000) + Incoming (300) ko pd.concat se combine kiya (Total: 1,300 records).
+Naya RandomForestClassifier(n_estimators=100, max_depth=6) train kiya.
+Candidate ka naya performance aaya: F1-Score: 92.00%, Accuracy: 93.85%.
+Candidate model ko separately mlops/models/candidate_model.joblib me save kiya.
+Nayi run ko MLflow me retrain-candidate-model ke naam se log kiya.
+Task D — Quality Gate & Metric Justification (implement_quality_gate)
+Why F1-Score? (Viva Question):
+
+"Resume evaluation me False Positive (honest candidate ko galat bolna) aur False Negative (unqualified candidate ko pass kar dena) dono ka bada nuksan hai. Accuracy class imbalance me galat tasveer dikha sakti hai, isliye humne Precision aur Recall dono ko balance karne ke liye F1-Score ko Quality Gate banaya."
+
+Rules Checked:
+cand_f1 >= 0.82 (Minimum Floor): PASS (0.9200 >= 0.82)
+cand_f1 >= champ_f1 (Champion se behtar): PASS (0.9200 >= 0.4216)
+Action: Candidate model ko promote kiya, champion_model.joblib update hua, aur MLflow me alias champion set kiya. Decision ko quality_gate_decision.json me record kiya.
+Task E — Reports & Artifacts (generate_reports)
+Auto-generate kiya mlops/reports/evaluation_report.md aur JSON metrics file.
+🎓 1-Minute Viva Summary (Agar Examiner puche)
+
+"Sir/Ma'am:
+
+Humare project me resume inflation detection model hai jo candidate ke claimed rating aur measured interview ability ka gap predict karta hai.
+Jab naya production batch aaya, humne pehle data validate kiya (Task A).
+Deployed champion model ka F1-score girkar 42.16% ho gaya tha (Task B).
+Humne baseline aur naye batch ko jodkar 1,300 samples par naya candidate model retrain kiya, jisne 92.00% F1-score achieve kiya aur MLflow me log hua (Task C).
+Quality Gate me humne F1-score metric chuna taaki False Positives aur False Negatives dono control rahein. Candidate model ne 0.82 ka floor pass kiya aur champion se behtar nikla, isliye ise successfully naya Champion promote kiya gaya (Task D & E)."
+
+
+
+
+
+🗺️ Part 1: MLOps Pipeline Complete Architecture (Deep Dive)
+
+Aapka poora system 7 interconnected stages par kaam karta hai:
+
+[ 1. Raw Data / Batches ]
+         │ (Schema, Missing Values, Duplicate Check)
+         ▼
+[ 2. Data Validation & Preprocessing ]
+         │ (claimed_skill, measured_ability, difference)
+         ▼
+[ 3. Model Training & Tuning ] ──► Logged to [ MLflow Experiment Tracking ]
+         │ (RandomForest: n_estimators, max_depth)    (Params, Metrics, Artifacts)
+         ▼
+[ 4. Performance Evaluation ] ──► Evaluated on New Live Batch (Task B)
+         │ (Accuracy, Precision, Recall, F1-Score)
+         ▼
+[ 5. Quality Gate Decision Engine ]
+         ├── If Candidate F1 >= 0.82 AND Candidate >= Champion ──► PROMOTE TO CHAMPION
+         └── Else ──► RETAIN EXISTING CHAMPION (Audit Log Recorded)
+         ▼
+[ 6. MLflow Model Registry ] ──► Alias: @champion
+         │
+         ▼
+[ 7. Production Model Serving ] ──► FastAPI REST API (/predict, /health)
+         │ (Loads @champion from Registry dynamically)
+         ▼
+[ HireWise AI Client Application ]
+📚 Part 2: Jo Topics Aapko Padhne Chahiye (Core Syllabus)
+
+Yeh 7 core topics hain jo MLOps assessment aur interviews me 100% puche jaate hain:
+
+Topic 1: Experiment Tracking vs Model Registry (MLflow)
+
+Examiner ka favorite question: "Experiment Tracking aur Model Registry me kya farak hai?"
+
+Experiment Tracking:
+Har training attempt (run) ki history record karna.
+Isme hyperparameters (n_estimators, max_depth), evaluation metrics (accuracy, f1_score), aur trained weights save hote hain.
+Example: Agar aapne 10 alag-alag model train kiye, toh MLflow me 10 runs dikhengi.
+Model Registry:
+Centralized model hub jahan sirf best/approved models store hote hain.
+Isme model versioning (v1, v2, v3) aur Aliases (champion, challenger) hote hain.
+Production server direct Model Registry se @champion model fetch karta hai.
+Topic 2: Data Drift, Concept Drift aur Performance Drift
+
+Examiner ka question: "Task B me purane champion model ka F1-score kyu gir gaya?"
+
+Data Drift:
+Input features ka distribution badal jana (jaise pehle candidates average 5-6 rating claim karte the, ab naye batch me sab 9-10 claim karne lage).
+Concept Drift:
+Input aur target ka relation badal jana (jaise interview scoring criteria pehle se strict ho gaya, toh pehle jo gap genuine tha, ab wo inflated maana jane laga).
+Performance Drift:
+Drift ki wajah se deployed model ki accuracy/F1-score gir jana.
+Solution: Jo humne kiya — naya data validate karke model ko Automated Retrain karna.
+Topic 3: Evaluation Metrics (Accuracy vs F1-Score)
+
+Examiner ka question: "F1-Score ko Quality Gate metric kyu chuna? Accuracy kyu nahi?"
+
+Confusion Matrix:
+TP (True Positive): Inflated resume ko sahi inflated pakda.
+TN (True Negative): Honest candidate ko sahi honest bola.
+FP (False Positive): Honest candidate par jhootha ilzaam lagaya (Company brand kharab).
+FN (False Negative): Jhoothe candidate ko pass kar diya (Technical rounds me company ka time waste).
+Accuracy Formula: 
+𝑇
+𝑃
++
+𝑇
+𝑁
+𝑇
+𝑃
++
+𝑇
+𝑁
++
+𝐹
+𝑃
++
+𝐹
+𝑁
+TP+TN+FP+FN
+TP+TN
+	​
+
+Problem: Agar 90% candidate honest hain, aur model sabko blind "Honest" predict kar de, toh accuracy 90% dikhegi, lekin usne ek bhi fraud pakda hi nahi! Isse Accuracy Paradox kehte hain.
+F1-Score Formula: 
+2
+×
+Precision
+×
+Recall
+Precision
++
+Recall
+2×
+Precision+Recall
+Precision×Recall
+	​
+
+Precision aur Recall ka harmonic mean hai. Yeh tabhi high hota hai jab False Positives aur False Negatives dono low hon. Isliye classification me hamesha F1-Score use karte hain.
+Topic 4: Champion-Challenger Pattern & Quality Gate
+
+Examiner ka question: "Quality Gate kya hota hai aur iska decision rule kya tha?"
+
+Quality Gate: Automated safety boundary jo ensure karta hai ki koi bhi naya model tab tak production me nahi jayega jab tak wo predefined business criteria pass na kare.
+Aapka Decision Rule:
+Minimum Floor: Candidate F1-score 
+≥
+0.82
+≥0.82 hona chahiye.
+Comparative Superiority: Candidate F1-score 
+≥
+≥ Champion F1-score hona chahiye.
+Non-Destructive Logging: Agar candidate fail ho jaye, toh champion delete nahi hota; audit log (quality_gate_decision.json) me rejection reason record hota hai.
+Topic 5: Real-time Model Serving (FastAPI Architecture)
+
+Examiner ka question: "serve.py me Lifespan context manager ka kya role hai?"
+
+Without Lifespan: Har HTTP request aane par disk se model load hota, jisse prediction me 2-3 second ka latency aata.
+With Lifespan: Server start hote hi model memory (RAM) me ek baar load ho jata hai. Ab har prediction sirf 2 to 5 milliseconds me execute hoti hai.
+Pydantic Validation: Type safety ensure karta hai. Agar koi claimed_skill: "nine" ya -5 bheje toh server crash hone ke bajaye 422 Unprocessable Entity return karta hai.
+Topic 6: ML Testing & Mocking (FakeModel)
+
+Examiner ka question: "test_api.py me FakeModel kyu use kiya gaya?"
+
+Production CI/CD pipelines me real ML model load karne se tests bohot slow ho jate hain aur heavy GPU/RAM chahiye hota hai.
+Humne FakeModel inject kiya jo model ke predict function ko simulate karta hai. Isse unit tests bina kisi MLflow server ya heavy model file ke 0.1 second me pass ho jaate hain.
+Topic 7: Docker Containerization for MLOps
+
+Examiner ka question: "Docker image me MLFLOW_TRACKING_URI environment variable kyu pass karte hain?"
+
+Docker container isolated environment hota hai.
+Jab container host machine ke MLflow server se communicate karta hai, toh hum environment variable pass karte hain: -e MLFLOW_TRACKING_URI=http://host.docker.internal:6001 Taaki containerized FastAPI app host machine par chal rahe MLflow Registry se @champion model download kar sake.
+🎯 Top 8 Viva Questions & Perfect Answers (Cheat Sheet)
+#	Question	Short & Perfect Answer
+1	Aapke project ka ML problem kya hai?	HireWise AI me candidate ke claimed rating aur AI interview me measured ability ke difference se resume inflation (fraud/exaggeration) detect karna (Binary Classification).
+2	Task A me kya data validation lagayi?	5 required columns check kiye, zero missing values ensure ki, duplicate candidate IDs check kiye, aur class distribution (60.7% Honest vs 39.3% Inflated) nikala.
+3	Task B me champion model ka performance kyu evaluate kiya?	Production me samay ke sath naye data par model drift ho sakta hai. Humne naye batch par check kiya toh champion ka F1-score girkar 42.16% ho gaya, jo retraining ki zaroorat prove karta hai.
+4	Task C me retrain kaise kiya?	1,000 baseline historical data aur 300 naye batch ko merge karke 1,300 clean samples banaye. Naya RandomForestClassifier (100 trees, depth 6) train karke candidate_model.joblib save kiya aur MLflow me log kiya.
+5	Task D me Quality Gate metric F1-Score kyu chuna?	Resume evaluation imbalanced data hota hai jahan False Positive aur False Negative dono ke business costs hain. Accuracy misleading ho sakti hai, isliye Precision aur Recall ka harmonic mean (F1-score) chuna.
+6	Quality Gate decision rule kya tha?	Minimum floor 
+𝐹
+1
+≥
+0.82
+F1≥0.82 aur Candidate F1 
+≥
+≥ Champion F1. Naye model ne 0.9200 F1 achieve kiya aur dono rules pass karke naya Champion bana.
+7	MLflow me Model Registry ka kya use hai?	Model Registry me trained models ka centralized version control hota hai. Humne @champion alias tag use kiya jisse production API dynamically best model serve karti hai.
+8	Agar candidate model quality gate fail kar de toh kya hoga?	Champion overwrite nahi hoga. Purana champion hi production me continue karega, aur rejection ka detailed reason quality_gate_decision.json me record hoga.
+📂 Quick File Links for Reference:
+📄 Main Pipeline: mlops/monitor_and_retrain.py
+📊 Generated Report: mlops/reports/evaluation_report.md
+⚖️ Decision Audit Log: mlops/reports/quality_gate_decision.json
+🌐 FastAPI Server: mlops/serve.py
+🧪 Pytest Suite: mlops/tests/test_monitoring.py
+
+
+
+📌 Category 1: Model Monitoring & Drift (Assessment Ka Core)
+
+Covariate Shift / Data Drift
+
+Matlab: Input features ka distribution badal jana (jaise naye candidates ka average experience ya ratings badal jana).
+Industry Tool: Evidently AI, Whylabs.
+
+Concept Drift / Prior Probability Shift
+
+Matlab: Input aur output ka relation badal jana (e.g., pehle jo resume score genuine tha, naye standards me wo inflated maana jana).
+
+Drift Detection Statistical Tests
+
+Matlab: Drift calculate karne ke statistical formulas.
+Key Tests: KS-Test (Kolmogorov-Smirnov), PSI (Population Stability Index), Wasserstein Distance.
+
+Data Degradation / Feature Drift
+
+Matlab: Production me koi feature missing aane lagna, corrupt ho jana ya scale change ho jana.
+📌 Category 2: Model Deployment & Serving Strategies
+
+Champion-Challenger (Shadow / Dark Launching)
+
+Matlab: Naya candidate model production me background me chalta hai (live predictions nahi deta), pehle uski accuracy compare ki jaati hai champion model se.
+
+Canary Deployment
+
+Matlab: Naye model ko 100% users ke liye release karne ke bajaye sirf 5% ya 10% users ko naye model ki predictions dena. Agar koi bug na aaye toh dheere-dheere 100% karna.
+
+A/B Testing for ML Models
+
+Matlab: 50% candidates ko Model A (purana) aur 50% ko Model B (naya) se evaluate karke business metrics compare karna.
+
+Batch Serving vs Real-Time Serving
+
+Batch: Roz raat ko 1 lakh resumes ek sath process karna (Cron job / Airflow).
+Real-time: User ne website par form bhara aur turant 5 milliseconds me prediction aayi (FastAPI / REST API).
+📌 Category 3: Model Governance & Artifact Tracking
+
+Model Lineage & Provenance
+
+Matlab: Audit trail rakhna ki production me chal raha model kis dataset version se, kis code commit se, aur kis hyperparameters par train hua tha.
+
+Model Registry & Model Versioning
+
+Matlab: Models ka GitHub! Version control (v1, v2), Aliases (@champion, @staging), aur lifecycle manage karna (MLflow Model Registry).
+
+Reproducibility in Machine Learning
+
+Matlab: Random seeds fix karna (random_state=42) aur dependencies lock karna (requirements.txt), taaki agar koi 2 saal baad bhi code chalaye toh bilkul same accuracy aaye.
+
+Metadata Store
+
+Matlab: Training runs ke metrics, parameters, hardware usage aur execution time ko store karne wala database (jaise SQLite backend MLflow me).
+📌 Category 4: Data Engineering & Feature Store
+
+Feature Store
+
+Matlab: Features ka centralized repository (e.g., Feast, Hopsworks) taaki training aur production inference dono me exact same formula use ho (Training-Serving Skew avoid karne ke liye).
+
+Data Versioning (DVC - Data Version Control)
+
+Matlab: Git code track karta hai, lekin 5GB ke dataset ko Git me commit nahi kar sakte. DVC se dataset versions ko S3/Google Drive par track karte hain.
+
+Schema Validation (Great Expectations / Pydantic)
+
+Matlab: Incoming data me column types, null values, aur ranges validate karna (jo humne Task A me kiya).
+📌 Category 5: Continuous Everything (CI / CD / CT)
+
+CT (Continuous Training / Automated Retraining)
+
+Matlab: Model ko manually train karne ke bajaye scheduled interval par ya drift detect hote hi automatically retrain hona (jo monitor_and_retrain.py pipeline karti hai).
+
+CI (Continuous Integration for ML)
+
+Matlab: Har code push par automated unit tests run hona (pytest mlops/tests) aur fake models ke sath API test hona.
+
+CD (Continuous Delivery / Deployment for ML)
+
+Matlab: Agar model Quality Gate pass kar leta hai, toh Docker container automatically build hoke server par deploy ho jana bina manual intervention ke.
+📌 Category 6: ML Testing & Quality Assurance
+
+Data Invariance Testing
+
+Matlab: Chhoti-moti changes se output drastically change nahi hona chahiye (e.g., candidate ka naam badalne se resume inflation prediction change nahi honi chahiye).
+
+Directional Expectation Testing
+
+Matlab: Agar candidate ka difference 1.0 se badhkar 6.0 ho jaye, toh inflation hone ki probability badhni hi chahiye, kam nahi ho sakti.
+
+Performance Floor & Threshold Gates
+
+Matlab: Production me jane ke liye minimum pass marks set karna (jaise humne 
+𝐹
+1
+≥
+0.82
+F1≥0.82 set kiya tha).
+📌 Category 7: Containerization & Orchestration
+
+Docker Multi-Stage Builds
+
+Matlab: Docker image ka size chhota rakhna aur build tools ko production image me include na karna.
+
+ML Pipeline Orchestration (Airflow / Prefect / Kubeflow)
+
+Matlab: Data extraction, training, testing aur deployment ko DAG (Directed Acyclic Graph) me schedule karna.
+
+Environment Variables & Secrets Management
+
+Matlab: API keys (GROQ_API_KEY, MLFLOW_TRACKING_URI) ko code me hardcode na karke .env se inject karna.
+💡 Quick Checklist (Agar aapko revise karna ho):
+
+Agar exam/viva me top score chahiye toh in 5 words ko sabse pehle dhyan me rakhein:
+
+Data Drift (Naye data me distribution badalna)
+MLflow Tracking & Registry (Runs record karna aur @champion tag lagana)
+Quality Gate (Criteria check karke model promote karna)
+F1-Score Justification (False Positive aur False Negative ko balance karna)
+FastAPI Lifespan (Model memory me ek baar load karke fast inference dena)
